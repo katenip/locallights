@@ -748,15 +748,29 @@ async function groupColor(name, value) {
   await loadDevices();
 }
 
-function loadScenePayload(id) {
+async function loadScenePayload(id) {
   const select = document.getElementById(`scenedp-${id}`);
   const area = document.getElementById(`scenepayload-${id}`);
   const dp = select.value;
-  fetch('/api/devices').then(r => r.json()).then(data => {
+  area.value = 'Loading...';
+  try {
+    await api(`/api/device/${id}/refresh`);
+    const data = await fetch('/api/devices').then(r => r.json());
     const device = (data.devices || []).find(x => x.id === id);
-    if (!device) return;
-    area.value = (device.scene_payloads && device.scene_payloads[dp]) || '';
-  });
+    if (!device) {
+      area.value = '';
+      alert('Could not find that device in the refreshed device list.');
+      return;
+    }
+    const payload = (device.scene_payloads && device.scene_payloads[dp]) || '';
+    area.value = payload;
+    if (!payload) {
+      alert(`No current payload was reported for DP ${dp}. This usually means the bulb is not exposing that slot in its latest status update.`);
+    }
+  } catch (err) {
+    area.value = '';
+    alert(`Load current failed: ${err.message || err}`);
+  }
 }
 
 async function sendScenePayload(id) {
