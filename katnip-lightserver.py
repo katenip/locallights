@@ -514,6 +514,7 @@ INDEX_HTML = """
 
 <script>
 let groupRules = {};
+const editorState = {};
 
 function hsvToHex(h, s, v) {
   s /= 255;
@@ -568,6 +569,38 @@ async function api(path, method='POST', body=null) {
   return await res.json();
 }
 
+function ensureEditorState(id) {
+  if (!editorState[id]) {
+    editorState[id] = {
+      sendDp: '6',
+      sendPayload: '',
+      loadedDp: '6',
+      loadedPayload: ''
+    };
+  }
+  return editorState[id];
+}
+
+function rememberEditorState(id) {
+  const state = ensureEditorState(id);
+  const sendDpEl = document.getElementById(`send-dp-${id}`);
+  const sendPayloadEl = document.getElementById(`send-scenepayload-${id}`);
+  const loadedDpEl = document.getElementById(`scenedp-${id}`);
+  const loadedPayloadEl = document.getElementById(`loaded-scenepayload-${id}`);
+  if (sendDpEl) state.sendDp = sendDpEl.value;
+  if (sendPayloadEl) state.sendPayload = sendPayloadEl.value;
+  if (loadedDpEl) state.loadedDp = loadedDpEl.value;
+  if (loadedPayloadEl) state.loadedPayload = loadedPayloadEl.value;
+}
+
+function rememberAllEditorStates() {
+  Object.keys(editorState).forEach(id => rememberEditorState(id));
+  document.querySelectorAll('[id^="send-dp-"]').forEach(el => {
+    const id = el.id.replace('send-dp-', '');
+    rememberEditorState(id);
+  });
+}
+
 function populateGroupFilter(groups) {
   const select = document.getElementById('groupFilter');
   const current = select.value || 'All';
@@ -586,6 +619,7 @@ function populateGroupFilter(groups) {
 }
 
 function buildDeviceCard(d) {
+  const state = ensureEditorState(d.id);
   const card = document.createElement('div');
   card.className = 'card';
   const statusClass = d.error ? 'err' : (d.is_on ? 'on' : 'off');
@@ -597,9 +631,6 @@ function buildDeviceCard(d) {
   const tempHint = d.supports_temp
     ? 'Real warm/cool white channel'
     : 'Approximate warmth using RGB colour mode';
-
-  const scenePayloads = d.scene_payloads || {};
-  const currentPayload = scenePayloads['6'] || scenePayloads['7'] || scenePayloads['8'] || scenePayloads['9'] || scenePayloads['10'] || '';
 
   card.innerHTML = `
     <div class="card-top">
@@ -636,24 +667,24 @@ function buildDeviceCard(d) {
 
     <div class="control-label">Loaded current payload</div>
     <div class="row">
-      <select id="scenedp-${d.id}" style="flex:0 0 140px;">
-        <option value="6">DP 6</option>
-        <option value="7">DP 7</option>
-        <option value="8">DP 8</option>
-        <option value="9">DP 9</option>
-        <option value="10">DP 10</option>
+      <select id="scenedp-${d.id}" style="flex:0 0 140px;" onchange="rememberEditorState('${d.id}')">
+        <option value="6" ${state.loadedDp === '6' ? 'selected' : ''}>DP 6</option>
+        <option value="7" ${state.loadedDp === '7' ? 'selected' : ''}>DP 7</option>
+        <option value="8" ${state.loadedDp === '8' ? 'selected' : ''}>DP 8</option>
+        <option value="9" ${state.loadedDp === '9' ? 'selected' : ''}>DP 9</option>
+        <option value="10" ${state.loadedDp === '10' ? 'selected' : ''}>DP 10</option>
       </select>
       <button class="action" onclick="loadScenePayload('${d.id}')">Load current</button>
       <button class="action" onclick="copyLoadedPayload('${d.id}')">Copy → send</button>
     </div>
-    <textarea id="loaded-scenepayload-${d.id}" readonly style="width:100%; min-height:72px; border:1px solid var(--border); background:var(--panel-3); color:var(--text); border-radius:16px; padding:12px; resize:vertical;">${currentPayload}</textarea>
+    <textarea id="loaded-scenepayload-${d.id}" readonly style="width:100%; min-height:72px; border:1px solid var(--border); background:var(--panel-3); color:var(--text); border-radius:16px; padding:12px; resize:vertical;">${state.loadedPayload || ''}</textarea>
 
     <div class="control-label">Send raw payload</div>
     <div class="row">
-      <input id="send-dp-${d.id}" type="text" value="6" placeholder="DP" style="flex:0 0 100px;" />
+      <input id="send-dp-${d.id}" type="text" value="${state.sendDp || '6'}" placeholder="DP" style="flex:0 0 100px;" oninput="rememberEditorState('${d.id}')" />
       <button class="action primary" onclick="sendScenePayload('${d.id}')">Send raw</button>
     </div>
-    <textarea id="send-scenepayload-${d.id}" style="width:100%; min-height:90px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;"></textarea>
+    <textarea id="send-scenepayload-${d.id}" style="width:100%; min-height:90px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" oninput="rememberEditorState('${d.id}')">${state.sendPayload || ''}</textarea>
 
     <div class="tiny" style="margin-top:10px;">Mode: ${d.mode || 'unknown'}</div>
   `;
@@ -716,6 +747,7 @@ function buildGroupBlock(groupName, devices) {
 }
 
 async function loadDevices() {
+  rememberAllEditorStates();
   const data = await fetch('/api/devices').then(r => r.json());
   groupRules = data.group_rules || {};
   const groups = data.groups || {};
@@ -731,14 +763,13 @@ async function loadDevices() {
   }
 }
 
-async function turnOn(id) { await api(`/api/device/${id}/on`); await loadDevices(); }
-async function turnOff(id) { await api(`/api/device/${id}/off`); await loadDevices(); }
-async function setBrightness(id, value) { await api(`/api/device/${id}/brightness`, 'POST', { brightness: parseInt(value, 10) }); await loadDevices(); }
-async function setTemp(id, value) { await api(`/api/device/${id}/temp`, 'POST', { temp: parseInt(value, 10) }); await loadDevices(); }
+async function turnOn(id) { await api(`/api/device/${id}/on`); }
+async function turnOff(id) { await api(`/api/device/${id}/off`); }
+async function setBrightness(id, value) { await api(`/api/device/${id}/brightness`, 'POST', { brightness: parseInt(value, 10) }); }
+async function setTemp(id, value) { await api(`/api/device/${id}/temp`, 'POST', { temp: parseInt(value, 10) }); }
 async function setColor(id, value) {
   const hsv = hexToHsv(value);
   await api(`/api/device/${id}/color`, 'POST', hsv);
-  await loadDevices();
 }
 async function refreshOne(id) { await api(`/api/device/${id}/refresh`); await loadDevices(); }
 async function refreshNow() { await api('/api/refresh'); await loadDevices(); }
@@ -748,14 +779,13 @@ async function setWarm(id) { await setTemp(id, 40); }
 async function setNeutral(id) { await setTemp(id, 128); }
 async function setCool(id) { await setTemp(id, 220); }
 
-async function groupOn(name) { await api(`/api/group/${encodeURIComponent(name)}/on`); await loadDevices(); }
-async function groupOff(name) { await api(`/api/group/${encodeURIComponent(name)}/off`); await loadDevices(); }
-async function groupBrightness(name, value) { await api(`/api/group/${encodeURIComponent(name)}/brightness`, 'POST', { brightness: parseInt(value, 10) }); await loadDevices(); }
-async function groupTemp(name, value) { await api(`/api/group/${encodeURIComponent(name)}/temp`, 'POST', { temp: parseInt(value, 10) }); await loadDevices(); }
+async function groupOn(name) { await api(`/api/group/${encodeURIComponent(name)}/on`); }
+async function groupOff(name) { await api(`/api/group/${encodeURIComponent(name)}/off`); }
+async function groupBrightness(name, value) { await api(`/api/group/${encodeURIComponent(name)}/brightness`, 'POST', { brightness: parseInt(value, 10) }); }
+async function groupTemp(name, value) { await api(`/api/group/${encodeURIComponent(name)}/temp`, 'POST', { temp: parseInt(value, 10) }); }
 async function groupColor(name, value) {
   const hsv = hexToHsv(value);
   await api(`/api/group/${encodeURIComponent(name)}/color`, 'POST', hsv);
-  await loadDevices();
 }
 
 async function loadScenePayload(id) {
@@ -774,8 +804,11 @@ async function loadScenePayload(id) {
     }
     const payload = (device.scene_payloads && device.scene_payloads[dp]) || '';
     area.value = payload;
+    const state = ensureEditorState(id);
+    state.loadedDp = dp;
+    state.loadedPayload = payload;
     if (!payload) {
-      alert(`No current payload was reported for DP ${dp}. This usually means the bulb is not exposing that slot in its latest status update.`);
+      alert(`No current payload was reported for DP ${dp}.`);
     }
   } catch (err) {
     area.value = '';
@@ -789,6 +822,7 @@ function copyLoadedPayload(id) {
   const selectedDp = document.getElementById(`scenedp-${id}`).value;
   document.getElementById(`send-dp-${id}`).value = selectedDp;
   sendArea.value = loaded;
+  rememberEditorState(id);
 }
 
 async function sendScenePayload(id) {
@@ -803,7 +837,7 @@ async function sendScenePayload(id) {
     return;
   }
   await api(`/api/device/${id}/scene_payload`, 'POST', { dp, payload });
-  await loadDevices();
+  rememberEditorState(id);
 }
 
 async function groupScenePayload(name) {
@@ -812,7 +846,6 @@ async function groupScenePayload(name) {
   const payload = prompt('Paste raw scene payload');
   if (!payload) return;
   await api(`/api/group/${encodeURIComponent(name)}/scene_payload`, 'POST', { dp, payload });
-  await loadDevices();
 }
 
 async function saveNewGroup() {
@@ -829,10 +862,7 @@ async function saveNewGroup() {
   await reloadDevices();
 }
 
-async function reloadDevices() { await api('/api/reload'); await loadDevices(); }
-
 loadDevices();
-setInterval(loadDevices, 8000);
 </script>
 </body>
 </html>
