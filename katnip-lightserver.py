@@ -523,22 +523,23 @@ function hsvToHex(h, s, v) {
   let x = c * (1 - Math.abs((h / 60) % 2 - 1));
   let m = v - c;
   let r = 0, g = 0, b = 0;
-  if (h < 60) [r,g,b] = [c,x,0];
-  else if (h < 120) [r,g,b] = [x,c,0];
-  else if (h < 180) [r,g,b] = [0,c,x];
-  else if (h < 240) [r,g,b] = [0,x,c];
-  else if (h < 300) [r,g,b] = [x,0,c];
-  else [r,g,b] = [c,0,x];
-  const toHex = n => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const toHex = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
 function hexToHsv(hex) {
   const m = hex.replace('#', '');
-  const r = parseInt(m.substring(0,2), 16) / 255;
-  const g = parseInt(m.substring(2,4), 16) / 255;
-  const b = parseInt(m.substring(4,6), 16) / 255;
-  const max = Math.max(r,g,b), min = Math.min(r,g,b);
+  const r = parseInt(m.substring(0, 2), 16) / 255;
+  const g = parseInt(m.substring(2, 4), 16) / 255;
+  const b = parseInt(m.substring(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
   const d = max - min;
   let h = 0;
   if (d !== 0) {
@@ -556,11 +557,11 @@ function hexToHsv(hex) {
   };
 }
 
-async function api(path, method='POST', body=null) {
+async function api(path, method = 'POST', body = null) {
   const res = await fetch(path, {
     method,
     headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : null
+    body: body ? JSON.stringify(body) : null,
   });
   if (!res.ok) {
     const txt = await res.text();
@@ -575,7 +576,8 @@ function ensureEditorState(id) {
       sendDp: '6',
       sendPayload: '',
       loadedDp: '6',
-      loadedPayload: ''
+      loadedPayload: '',
+      batchPayload: '',
     };
   }
   return editorState[id];
@@ -587,15 +589,17 @@ function rememberEditorState(id) {
   const sendPayloadEl = document.getElementById(`send-scenepayload-${id}`);
   const loadedDpEl = document.getElementById(`scenedp-${id}`);
   const loadedPayloadEl = document.getElementById(`loaded-scenepayload-${id}`);
+  const batchPayloadEl = document.getElementById(`batch-payload-${id}`);
   if (sendDpEl) state.sendDp = sendDpEl.value;
   if (sendPayloadEl) state.sendPayload = sendPayloadEl.value;
   if (loadedDpEl) state.loadedDp = loadedDpEl.value;
   if (loadedPayloadEl) state.loadedPayload = loadedPayloadEl.value;
+  if (batchPayloadEl) state.batchPayload = batchPayloadEl.value;
 }
 
 function rememberAllEditorStates() {
-  Object.keys(editorState).forEach(id => rememberEditorState(id));
-  document.querySelectorAll('[id^="send-dp-"]').forEach(el => {
+  Object.keys(editorState).forEach((id) => rememberEditorState(id));
+  document.querySelectorAll('[id^="send-dp-"]').forEach((el) => {
     const id = el.id.replace('send-dp-', '');
     rememberEditorState(id);
   });
@@ -691,7 +695,7 @@ function buildDeviceCard(d) {
     <div class="row">
       <button class="action primary" onclick="sendBatchPayload('${d.id}')">Send batch</button>
     </div>
-    <textarea id="batch-payload-${d.id}" style="width:100%; min-height:110px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" placeholder="2=scene&#10;6=00b0cf00000000"></textarea>
+    <textarea id="batch-payload-${d.id}" style="width:100%; min-height:110px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" placeholder="2=scene&#10;6=00b0cf00000000" oninput="rememberEditorState('${d.id}')">${state.batchPayload || ''}</textarea>
 
     <div class="tiny" style="margin-top:10px;">Mode: ${d.mode || 'unknown'}</div>
   `;
@@ -755,7 +759,7 @@ function buildGroupBlock(groupName, devices) {
 
 async function loadDevices() {
   rememberAllEditorStates();
-  const data = await fetch('/api/devices').then(r => r.json());
+  const data = await fetch('/api/devices').then((r) => r.json());
   groupRules = data.group_rules || {};
   const groups = data.groups || {};
   populateGroupFilter(Object.keys(groups));
@@ -778,6 +782,7 @@ async function setColor(id, value) {
   const hsv = hexToHsv(value);
   await api(`/api/device/${id}/color`, 'POST', hsv);
 }
+async function refreshOne(id) { await api(`/api/device/${id}/refresh`); await loadDevices(); }
 async function refreshNow() { await api('/api/refresh'); await loadDevices(); }
 async function reloadDevices() { await api('/api/reload'); await loadDevices(); }
 
@@ -801,8 +806,8 @@ async function loadScenePayload(id) {
   area.value = 'Loading...';
   try {
     await api(`/api/device/${id}/refresh`);
-    const data = await fetch('/api/devices').then(r => r.json());
-    const device = (data.devices || []).find(x => x.id === id);
+    const data = await fetch('/api/devices').then((r) => r.json());
+    const device = (data.devices || []).find((x) => x.id === id);
     if (!device) {
       area.value = '';
       alert('Could not find that device in the refreshed device list.');
@@ -848,7 +853,9 @@ async function sendScenePayload(id) {
 
 async function sendBatchPayload(id) {
   const raw = document.getElementById(`batch-payload-${id}`).value;
-  const lines = raw.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0);
+  const lines = raw.split('
+').map((x) => x.replace(/
+/g, '').trim()).filter((x) => x.length > 0);
   if (!lines.length) {
     alert('Enter one or more commands like dp=value');
     return;
@@ -868,7 +875,8 @@ async function sendBatchPayload(id) {
     }
     commands.push({ dp, value });
   }
-  aw
+  await api(`/api/device/${id}/multi_payload`, 'POST', { commands });
+}
 
 async function groupScenePayload(name) {
   const dp = prompt('Scene DP/channel to send? Use 6, 7, 8, 9, 10 or any numeric DP', '6');
@@ -885,7 +893,7 @@ async function saveNewGroup() {
     alert('Give the group a name and at least one match pattern.');
     return;
   }
-  const patterns = patternsRaw.split(',').map(x => x.trim()).filter(Boolean);
+  const patterns = patternsRaw.split(',').map((x) => x.trim()).filter(Boolean);
   await api('/api/groups', 'POST', { name, patterns });
   document.getElementById('newGroupName').value = '';
   document.getElementById('newGroupPatterns').value = '';
