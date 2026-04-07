@@ -778,7 +778,6 @@ async function setColor(id, value) {
   const hsv = hexToHsv(value);
   await api(`/api/device/${id}/color`, 'POST', hsv);
 }
-async function refreshOne(id) { await api(`/api/device/${id}/refresh`); await loadDevices(); }
 async function refreshNow() { await api('/api/refresh'); await loadDevices(); }
 async function reloadDevices() { await api('/api/reload'); await loadDevices(); }
 
@@ -849,9 +848,7 @@ async function sendScenePayload(id) {
 
 async function sendBatchPayload(id) {
   const raw = document.getElementById(`batch-payload-${id}`).value;
-  const lines = raw.split(/
-?
-/).map(x => x.trim()).filter(Boolean);
+  const lines = raw.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0);
   if (!lines.length) {
     alert('Enter one or more commands like dp=value');
     return;
@@ -871,8 +868,7 @@ async function sendBatchPayload(id) {
     }
     commands.push({ dp, value });
   }
-  await api(`/api/device/${id}/multi_payload`, 'POST', { commands });
-}
+  aw
 
 async function groupScenePayload(name) {
   const dp = prompt('Scene DP/channel to send? Use 6, 7, 8, 9, 10 or any numeric DP', '6');
