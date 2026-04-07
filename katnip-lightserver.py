@@ -853,9 +853,7 @@ async function sendScenePayload(id) {
 
 async function sendBatchPayload(id) {
   const raw = document.getElementById(`batch-payload-${id}`).value;
-  const lines = raw.split('
-').map((x) => x.replace(/
-/g, '').trim()).filter((x) => x.length > 0);
+  const lines = raw.split('\n').map((x) => x.replace(/\r/g, '').trim()).filter((x) => x.length > 0);
   if (!lines.length) {
     alert('Enter one or more commands like dp=value');
     return;
