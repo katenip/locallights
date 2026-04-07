@@ -17,12 +17,6 @@ POLL_INTERVAL_SECONDS = 5
 HOST = "0.0.0.0"
 PORT = 8080
 
-FAKE_TEMP_PRESETS = {
-    "warm": {"h": 35, "s": 170, "v": 255},
-    "neutral": {"h": 42, "s": 70, "v": 255},
-    "cool": {"h": 210, "s": 35, "v": 255},
-}
-
 SCENE_DP_OPTIONS = {
     "6": "scene_data",
     "7": "flash_scene_1",
@@ -44,6 +38,10 @@ devices: List[Dict[str, Any]] = []
 clients: Dict[str, tinytuya.BulbDevice] = {}
 last_status: Dict[str, Dict[str, Any]] = {}
 last_error: Dict[str, str] = {}
+
+spam_threads: Dict[str, threading.Thread] = {}
+spam_stop_flags: Dict[str, threading.Event] = {}
+spam_state: Dict[str, Dict[str, Any]] = {}
 
 
 # -----------------------------
@@ -233,7 +231,9 @@ def set_white(device_id: str, brightness: int) -> Dict[str, Any]:
     client.set_mode("white")
     client.set_brightness(brightness)
     time.sleep(0.15)
-    refresh_device_status(find_device(device_id))
+    d = find_device(device_id)
+    if d:
+        refresh_device_status(d)
     return last_status.get(device_id, {})
 
 
@@ -254,7 +254,7 @@ def set_temp(device_id: str, temp: int) -> Dict[str, Any]:
         client.set_mode("colour")
         client.set_hsv(max(1, min(360, h)), max(1, min(255, s)), 255)
     time.sleep(0.15)
-    refresh_device_status(find_device(device_id))
+    refresh_device_status(device)
     return last_status.get(device_id, {})
 
 
@@ -266,7 +266,9 @@ def set_colour(device_id: str, h: int, s: int, v: int) -> Dict[str, Any]:
     client.set_mode("colour")
     client.set_hsv(h, s, v)
     time.sleep(0.15)
-    refresh_device_status(find_device(device_id))
+    d = find_device(device_id)
+    if d:
+        refresh_device_status(d)
     return last_status.get(device_id, {})
 
 
@@ -288,7 +290,9 @@ def set_scene_payload(device_id: str, dp: str, payload: str) -> Dict[str, Any]:
         pass
     client.set_value(dp, payload)
     time.sleep(0.2)
-    refresh_device_status(find_device(device_id))
+    d = find_device(device_id)
+    if d:
+        refresh_device_status(d)
     return last_status.get(device_id, {})
 
 
@@ -310,73 +314,166 @@ def run_group_action(group_name: str, action: str, payload: Optional[Dict[str, A
     refresh_all_status()
 
 
-def parse_command_value(value):
+def parse_command_value(value: Any) -> Any:
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered == "true":
+        if lowered in ("true", "on", "yes"):
             return True
-        if lowered == "false":
+        if lowered in ("false", "off", "no"):
             return False
         try:
             return int(value)
         except Exception:
-            return value
+            return value.strip()
     return value
 
 
-def send_multi_commands_once(device_id: str, commands: List[Dict[str, Any]]) -> Dict[str, Any]:
-    if not isinstance(commands, list) or not commands:
-        raise ValueError("commands must be a non-empty list")
-
+def send_single_dp_value(device_id: str, dp: str, value: Any) -> None:
+    dp = str(dp).strip()
+    if not dp.isdigit():
+        raise ValueError(f"Invalid dp: {dp}")
+    parsed = parse_command_value(value)
     client = get_client(device_id)
-    states = {}
+    client.set_value(dp, parsed)
 
-    for cmd in commands:
-        dp = str(cmd.get("dp", "")).strip()
-        value = cmd.get("value", "")
-        if not dp.isdigit():
-            raise ValueError(f"Invalid dp: {dp}")
-        states[dp] = parse_command_value(value)
 
-    client.set_multiple_values(states)
+def send_command_sequence_once(device_id: str, actions: List[Dict[str, Any]], stop_event: Optional[threading.Event] = None) -> Dict[str, Any]:
+    if not isinstance(actions, list) or not actions:
+        raise ValueError("actions must be a non-empty list")
+
+    for action in actions:
+        if stop_event and stop_event.is_set():
+            break
+
+        kind = action.get("kind")
+        if kind == "delay":
+            delay_ms = max(0, int(action.get("ms", 0)))
+            if stop_event:
+                stop_event.wait(delay_ms / 1000.0)
+            else:
+                time.sleep(delay_ms / 1000.0)
+        elif kind == "command":
+            send_single_dp_value(device_id, action["dp"], action["value"])
+        else:
+            raise ValueError(f"Unknown action kind: {kind}")
+
     time.sleep(0.05)
-    refresh_device_status(find_device(device_id))
+    d = find_device(device_id)
+    if d:
+        refresh_device_status(d)
     return last_status.get(device_id, {})
 
 
-def spam_repeat_commands(
+def repeat_command_sequence(
     device_id: str,
-    commands: List[Dict[str, Any]],
+    actions: List[Dict[str, Any]],
     repeat_count: int = 10,
     delay_ms: int = 100,
 ) -> Dict[str, Any]:
-    repeat_count = max(1, min(10000, int(repeat_count)))
+    repeat_count = max(1, min(100000, int(repeat_count)))
     delay_ms = max(0, min(60000, int(delay_ms)))
 
     result = {}
     for _ in range(repeat_count):
-        result = send_multi_commands_once(device_id, commands)
+        result = send_command_sequence_once(device_id, actions)
         if delay_ms > 0:
             time.sleep(delay_ms / 1000.0)
     return result
 
 
-def spam_repeat_commands_for_duration(
-    device_id: str,
-    commands: List[Dict[str, Any]],
-    duration_ms: int = 3000,
-    delay_ms: int = 100,
-) -> Dict[str, Any]:
-    duration_ms = max(1, min(600000, int(duration_ms)))
-    delay_ms = max(0, min(60000, int(delay_ms)))
+def stop_spam_loop(device_id: str) -> None:
+    stop_event = spam_stop_flags.get(device_id)
+    if stop_event:
+        stop_event.set()
 
-    end_time = time.time() + (duration_ms / 1000.0)
-    result = {}
-    while time.time() < end_time:
-        result = send_multi_commands_once(device_id, commands)
-        if delay_ms > 0:
-            time.sleep(delay_ms / 1000.0)
-    return result
+
+def start_infinite_spam_loop(device_id: str, actions: List[Dict[str, Any]], delay_ms: int = 100) -> None:
+    stop_spam_loop(device_id)
+
+    stop_event = threading.Event()
+    spam_stop_flags[device_id] = stop_event
+
+    with state_lock:
+        spam_state[device_id] = {
+            "running": True,
+            "mode": "infinite",
+            "delay_ms": delay_ms,
+            "started_at": time.time(),
+        }
+
+    def worker():
+        try:
+            while not stop_event.is_set():
+                send_command_sequence_once(device_id, actions, stop_event=stop_event)
+                if stop_event.is_set():
+                    break
+                if delay_ms > 0:
+                    stop_event.wait(delay_ms / 1000.0)
+        finally:
+            with state_lock:
+                spam_state[device_id] = {
+                    "running": False,
+                    "mode": "idle",
+                    "delay_ms": delay_ms,
+                    "stopped_at": time.time(),
+                }
+
+    thread = threading.Thread(target=worker, daemon=True)
+    spam_threads[device_id] = thread
+    thread.start()
+
+
+def parse_sequence_text(raw: str) -> List[Dict[str, Any]]:
+    if not isinstance(raw, str):
+        raise ValueError("sequence text must be a string")
+
+    lines = raw.splitlines()
+    actions: List[Dict[str, Any]] = []
+    in_block = False
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("{"):
+            if in_block:
+                raise ValueError("Nested { blocks are not supported")
+            in_block = True
+            continue
+
+        if line == "}":
+            if not in_block:
+                raise ValueError("Found } without a matching {")
+            in_block = False
+            continue
+
+        if line.startswith("#"):
+            continue
+
+        if "=" not in line:
+            raise ValueError(f"Invalid line: {line}")
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if in_block and key.lower() == "delay":
+            actions.append({"kind": "delay", "ms": int(value)})
+            continue
+
+        if not key.isdigit():
+            raise ValueError(f"Invalid dp in line: {line}")
+
+        actions.append({"kind": "command", "dp": key, "value": value})
+
+    if in_block:
+        raise ValueError("Missing closing }")
+
+    if not actions:
+        raise ValueError("No commands found")
+
+    return actions
 
 
 # -----------------------------
@@ -411,7 +508,7 @@ INDEX_HTML = """
       background: linear-gradient(180deg, #0a0f1d 0%, #111735 100%);
       color: var(--text);
     }
-    .wrap { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    .wrap { max-width: 1450px; margin: 0 auto; padding: 24px; }
     .header {
       display: flex;
       justify-content: space-between;
@@ -498,9 +595,14 @@ INDEX_HTML = """
       color: #09111f;
       border: none;
     }
+    .action.stop {
+      background: linear-gradient(135deg, #ff8e8e, #ffb08e);
+      color: #1a0d0d;
+      border: none;
+    }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
       gap: 18px;
     }
     .card {
@@ -542,6 +644,8 @@ INDEX_HTML = """
     .tiny { font-size: 12px; color: var(--muted); }
     .footer-note { color: var(--muted); font-size: 13px; margin-top: 20px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .status-running { color: #67d48e; font-weight: 700; }
+    .status-stopped { color: var(--muted); font-weight: 700; }
   </style>
 </head>
 <body>
@@ -567,7 +671,11 @@ INDEX_HTML = """
     </div>
 
     <div id="groups"></div>
-    <div class="footer-note">Group rules are stored in <span class="mono">~/light_groups.json</span>. Raw scene payload sending supports DPS 6–10. Batch commands and spam repeat support any numeric DP.</div>
+    <div class="footer-note">
+      Batch syntax supports plain lines like <span class="mono">2=colour</span> and blocks like
+      <span class="mono">{</span> ... <span class="mono">delay=100</span> ... <span class="mono">}</span>.
+      Set repeat count to <span class="mono">-1</span> to loop until Stop is clicked.
+    </div>
   </div>
 
 <script>
@@ -648,10 +756,9 @@ function ensureEditorState(id) {
       sendPayload: '',
       loadedDp: '6',
       loadedPayload: '',
-      batchPayload: '',
+      sequenceText: '{\\n1=true\\n2=colour\\ndelay=100\\n5=000000ff00ff\\n}',
       spamRepeatCount: '20',
       spamDelayMs: '100',
-      spamDurationMs: '3000',
     };
   }
   return editorState[id];
@@ -663,19 +770,17 @@ function rememberEditorState(id) {
   const sendPayloadEl = document.getElementById(`send-scenepayload-${id}`);
   const loadedDpEl = document.getElementById(`scenedp-${id}`);
   const loadedPayloadEl = document.getElementById(`loaded-scenepayload-${id}`);
-  const batchPayloadEl = document.getElementById(`batch-payload-${id}`);
+  const sequenceTextEl = document.getElementById(`sequence-text-${id}`);
   const spamRepeatCountEl = document.getElementById(`spam-repeat-count-${id}`);
   const spamDelayMsEl = document.getElementById(`spam-delay-ms-${id}`);
-  const spamDurationMsEl = document.getElementById(`spam-duration-ms-${id}`);
 
   if (sendDpEl) state.sendDp = sendDpEl.value;
   if (sendPayloadEl) state.sendPayload = sendPayloadEl.value;
   if (loadedDpEl) state.loadedDp = loadedDpEl.value;
   if (loadedPayloadEl) state.loadedPayload = loadedPayloadEl.value;
-  if (batchPayloadEl) state.batchPayload = batchPayloadEl.value;
+  if (sequenceTextEl) state.sequenceText = sequenceTextEl.value;
   if (spamRepeatCountEl) state.spamRepeatCount = spamRepeatCountEl.value;
   if (spamDelayMsEl) state.spamDelayMs = spamDelayMsEl.value;
-  if (spamDurationMsEl) state.spamDurationMs = spamDurationMsEl.value;
 }
 
 function rememberAllEditorStates() {
@@ -716,6 +821,9 @@ function buildDeviceCard(d) {
   const tempHint = d.supports_temp
     ? 'Real warm/cool white channel'
     : 'Approximate warmth using RGB colour mode';
+  const spamInfo = d.spam || { running: false, mode: 'idle' };
+  const spamStatusClass = spamInfo.running ? 'status-running' : 'status-stopped';
+  const spamStatusText = spamInfo.running ? `Running (${spamInfo.mode})` : 'Stopped';
 
   card.innerHTML = `
     <div class="card-top">
@@ -728,7 +836,9 @@ function buildDeviceCard(d) {
 
     ${d.error ? `<div class="tiny" style="color:#ff8e8e; margin-bottom:10px;">${d.error}</div>` : ''}
 
-    <div class="row">
+    <div class="tiny">Spam status: <span class="${spamStatusClass}">${spamStatusText}</span></div>
+
+    <div class="row" style="margin-top:10px;">
       <button class="action primary" onclick="turnOn('${d.id}')">On</button>
       <button class="action" onclick="turnOff('${d.id}')">Off</button>
       <button class="action" onclick="refreshOne('${d.id}')">Refresh</button>
@@ -771,25 +881,28 @@ function buildDeviceCard(d) {
     </div>
     <textarea id="send-scenepayload-${d.id}" style="width:100%; min-height:90px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" oninput="rememberEditorState('${d.id}')">${state.sendPayload || ''}</textarea>
 
-    <div class="control-label">Batch commands</div>
-    <div class="tiny">One command per line: <span class="mono">dp=value</span>. Example: <span class="mono">2=scene</span> or <span class="mono">6=00b0cf00000000</span></div>
-    <div class="row">
-      <button class="action primary" onclick="sendBatchPayload('${d.id}')">Send batch</button>
+    <div class="control-label">Sequence / spam script</div>
+    <div class="tiny">
+      Supports plain lines like <span class="mono">2=colour</span> and blocks:
+      <span class="mono">{</span><br>
+      <span class="mono">delay=100</span><br>
+      <span class="mono">5=000000ff00ff</span><br>
+      <span class="mono">}</span>
     </div>
-    <textarea id="batch-payload-${d.id}" style="width:100%; min-height:110px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" placeholder="2=colour&#10;5=000000ff00ff" oninput="rememberEditorState('${d.id}')">${state.batchPayload || ''}</textarea>
+    <textarea id="sequence-text-${d.id}" style="width:100%; min-height:170px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" oninput="rememberEditorState('${d.id}')">${state.sequenceText || ''}</textarea>
 
-    <div class="control-label">Spam repeat</div>
-    <div class="tiny">Repeats the batch commands over and over.</div>
+    <div class="control-label">Repeat settings</div>
+    <div class="tiny">Use repeat count <span class="mono">-1</span> for infinite loop until Stop.</div>
 
     <div class="row">
       <input id="spam-repeat-count-${d.id}" type="text" value="${state.spamRepeatCount || '20'}" placeholder="Repeat count" style="flex:0 0 120px;" oninput="rememberEditorState('${d.id}')" />
-      <input id="spam-delay-ms-${d.id}" type="text" value="${state.spamDelayMs || '100'}" placeholder="Delay ms" style="flex:0 0 120px;" oninput="rememberEditorState('${d.id}')" />
-      <button class="action primary" onclick="sendSpamRepeat('${d.id}')">Spam repeat</button>
+      <input id="spam-delay-ms-${d.id}" type="text" value="${state.spamDelayMs || '100'}" placeholder="Loop delay ms" style="flex:0 0 140px;" oninput="rememberEditorState('${d.id}')" />
     </div>
 
     <div class="row" style="margin-top:8px;">
-      <input id="spam-duration-ms-${d.id}" type="text" value="${state.spamDurationMs || '3000'}" placeholder="Duration ms" style="flex:0 0 120px;" oninput="rememberEditorState('${d.id}')" />
-      <button class="action" onclick="sendSpamDuration('${d.id}')">Spam for duration</button>
+      <button class="action primary" onclick="runSequenceOnce('${d.id}')">Run once</button>
+      <button class="action primary" onclick="runSequenceRepeat('${d.id}')">Run repeat</button>
+      <button class="action stop" onclick="stopSpam('${d.id}')">Stop</button>
     </div>
 
     <div class="tiny" style="margin-top:10px;">Mode: ${d.mode || 'unknown'}</div>
@@ -946,69 +1059,37 @@ async function sendScenePayload(id) {
   rememberEditorState(id);
 }
 
-function parseBatchCommands(raw) {
-  const lines = raw.split('\\n').map((x) => x.replace(/\\r/g, '').trim()).filter((x) => x.length > 0);
-  if (!lines.length) {
-    throw new Error('Enter one or more commands like dp=value');
-  }
-
-  const commands = [];
-  for (const line of lines) {
-    const idx = line.indexOf('=');
-    if (idx === -1) {
-      throw new Error(`Invalid line: ${line}`);
-    }
-    const dp = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
-    if (!dp || !value) {
-      throw new Error(`Invalid line: ${line}`);
-    }
-    commands.push({ dp, value });
-  }
-  return commands;
-}
-
-async function sendBatchPayload(id) {
+async function runSequenceOnce(id) {
   try {
-    const raw = document.getElementById(`batch-payload-${id}`).value;
-    const commands = parseBatchCommands(raw);
-    await api(`/api/device/${id}/multi_payload`, 'POST', { commands });
+    const raw = document.getElementById(`sequence-text-${id}`).value;
+    await api(`/api/device/${id}/sequence_once`, 'POST', { script: raw });
+    await loadDevices();
   } catch (err) {
     alert(err.message || err);
   }
 }
 
-async function sendSpamRepeat(id) {
+async function runSequenceRepeat(id) {
   try {
-    const raw = document.getElementById(`batch-payload-${id}`).value;
+    const raw = document.getElementById(`sequence-text-${id}`).value;
     const repeatCount = parseInt(document.getElementById(`spam-repeat-count-${id}`).value || '20', 10);
     const delayMs = parseInt(document.getElementById(`spam-delay-ms-${id}`).value || '100', 10);
-    const commands = parseBatchCommands(raw);
 
-    await api(`/api/device/${id}/spam_payload`, 'POST', {
-      commands,
-      mode: 'count',
+    await api(`/api/device/${id}/sequence_repeat`, 'POST', {
+      script: raw,
       repeat_count: repeatCount,
       delay_ms: delayMs,
     });
+    await loadDevices();
   } catch (err) {
     alert(err.message || err);
   }
 }
 
-async function sendSpamDuration(id) {
+async function stopSpam(id) {
   try {
-    const raw = document.getElementById(`batch-payload-${id}`).value;
-    const durationMs = parseInt(document.getElementById(`spam-duration-ms-${id}`).value || '3000', 10);
-    const delayMs = parseInt(document.getElementById(`spam-delay-ms-${id}`).value || '100', 10);
-    const commands = parseBatchCommands(raw);
-
-    await api(`/api/device/${id}/spam_payload`, 'POST', {
-      commands,
-      mode: 'duration',
-      duration_ms: durationMs,
-      delay_ms: delayMs,
-    });
+    await api(`/api/device/${id}/sequence_stop`, 'POST', {});
+    await loadDevices();
   } catch (err) {
     alert(err.message || err);
   }
@@ -1037,6 +1118,7 @@ async function saveNewGroup() {
 }
 
 loadDevices();
+setInterval(loadDevices, 3000);
 </script>
 </body>
 </html>
@@ -1071,6 +1153,7 @@ def api_devices():
                 }
             if device_id in last_error:
                 status["error"] = last_error[device_id]
+            status["spam"] = dict(spam_state.get(device_id, {"running": False, "mode": "idle"}))
             merged.append(status)
 
     grouped: Dict[str, List[Dict[str, Any]]] = {}
@@ -1105,7 +1188,9 @@ def api_turn_on(device_id: str):
     try:
         client = get_client(device_id)
         client.turn_on()
-        refresh_device_status(find_device(device_id))
+        d = find_device(device_id)
+        if d:
+            refresh_device_status(d)
         return jsonify({"ok": True, "device": last_status.get(device_id, {})})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1116,7 +1201,9 @@ def api_turn_off(device_id: str):
     try:
         client = get_client(device_id)
         client.turn_off()
-        refresh_device_status(find_device(device_id))
+        d = find_device(device_id)
+        if d:
+            refresh_device_status(d)
         return jsonify({"ok": True, "device": last_status.get(device_id, {})})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1169,51 +1256,39 @@ def api_scene_payload(device_id: str):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/device/<device_id>/multi_payload", methods=["POST"])
-def api_multi_payload(device_id: str):
+@app.route("/api/device/<device_id>/sequence_once", methods=["POST"])
+def api_sequence_once(device_id: str):
     try:
         payload = request.get_json(force=True)
-        commands = payload.get("commands", [])
-        if not isinstance(commands, list) or not commands:
-            return jsonify({"error": "commands must be a non-empty list"}), 400
-
-        result = send_multi_commands_once(device_id, commands)
+        script = str(payload.get("script", ""))
+        actions = parse_sequence_text(script)
+        result = send_command_sequence_once(device_id, actions)
         return jsonify({"ok": True, "device": result})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/device/<device_id>/spam_payload", methods=["POST"])
-def api_spam_payload(device_id: str):
+@app.route("/api/device/<device_id>/sequence_repeat", methods=["POST"])
+def api_sequence_repeat(device_id: str):
     try:
         payload = request.get_json(force=True)
-        commands = payload.get("commands", [])
-        mode = str(payload.get("mode", "count")).strip().lower()
+        script = str(payload.get("script", ""))
+        repeat_count = int(payload.get("repeat_count", 10))
         delay_ms = int(payload.get("delay_ms", 100))
+        actions = parse_sequence_text(script)
 
-        if not isinstance(commands, list) or not commands:
-            return jsonify({"error": "commands must be a non-empty list"}), 400
-
-        if mode == "duration":
-            duration_ms = int(payload.get("duration_ms", 3000))
-            result = spam_repeat_commands_for_duration(
-                device_id=device_id,
-                commands=commands,
-                duration_ms=duration_ms,
-                delay_ms=delay_ms,
-            )
+        if repeat_count == -1:
+            start_infinite_spam_loop(device_id, actions, delay_ms=delay_ms)
             return jsonify({
                 "ok": True,
-                "device": result,
-                "mode": "duration",
-                "duration_ms": duration_ms,
+                "mode": "infinite",
+                "repeat_count": repeat_count,
                 "delay_ms": delay_ms,
             })
 
-        repeat_count = int(payload.get("repeat_count", 10))
-        result = spam_repeat_commands(
+        result = repeat_command_sequence(
             device_id=device_id,
-            commands=commands,
+            actions=actions,
             repeat_count=repeat_count,
             delay_ms=delay_ms,
         )
@@ -1224,6 +1299,15 @@ def api_spam_payload(device_id: str):
             "repeat_count": repeat_count,
             "delay_ms": delay_ms,
         })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/device/<device_id>/sequence_stop", methods=["POST"])
+def api_sequence_stop(device_id: str):
+    try:
+        stop_spam_loop(device_id)
+        return jsonify({"ok": True, "stopped": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1318,4 +1402,4 @@ if __name__ == "__main__":
     init_clients()
     refresh_all_status()
     threading.Thread(target=poller, daemon=True).start()
-    app.run(host=HOST, port=PORT, debug=False)
+    app.run(host=HOST, port=PORT, debug=False, threaded=True)
