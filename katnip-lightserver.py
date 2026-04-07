@@ -758,7 +758,7 @@ async function groupColor(name, value) {
   await loadDevices();
 }
 
-async async function loadScenePayload(id) {
+async function loadScenePayload(id) {
   const select = document.getElementById(`scenedp-${id}`);
   const area = document.getElementById(`loaded-scenepayload-${id}`);
   const dp = select.value;
@@ -828,6 +828,8 @@ async function saveNewGroup() {
   document.getElementById('newGroupPatterns').value = '';
   await reloadDevices();
 }
+
+async function reloadDevices() { await api('/api/reload'); await loadDevices(); }
 
 loadDevices();
 setInterval(loadDevices, 8000);
