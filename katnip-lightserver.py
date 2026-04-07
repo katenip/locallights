@@ -686,6 +686,13 @@ function buildDeviceCard(d) {
     </div>
     <textarea id="send-scenepayload-${d.id}" style="width:100%; min-height:90px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" oninput="rememberEditorState('${d.id}')">${state.sendPayload || ''}</textarea>
 
+    <div class="control-label">Batch commands</div>
+    <div class="tiny">One command per line: <span class="mono">dp=value</span>. Example: <span class="mono">2=scene</span> or <span class="mono">6=00b0cf00000000</span></div>
+    <div class="row">
+      <button class="action primary" onclick="sendBatchPayload('${d.id}')">Send batch</button>
+    </div>
+    <textarea id="batch-payload-${d.id}" style="width:100%; min-height:110px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;" placeholder="2=scene&#10;6=00b0cf00000000"></textarea>
+
     <div class="tiny" style="margin-top:10px;">Mode: ${d.mode || 'unknown'}</div>
   `;
   return card;
@@ -840,6 +847,33 @@ async function sendScenePayload(id) {
   rememberEditorState(id);
 }
 
+async function sendBatchPayload(id) {
+  const raw = document.getElementById(`batch-payload-${id}`).value;
+  const lines = raw.split(/
+?
+/).map(x => x.trim()).filter(Boolean);
+  if (!lines.length) {
+    alert('Enter one or more commands like dp=value');
+    return;
+  }
+  const commands = [];
+  for (const line of lines) {
+    const idx = line.indexOf('=');
+    if (idx === -1) {
+      alert(`Invalid line: ${line}`);
+      return;
+    }
+    const dp = line.slice(0, idx).trim();
+    const value = line.slice(idx + 1).trim();
+    if (!dp || !value) {
+      alert(`Invalid line: ${line}`);
+      return;
+    }
+    commands.push({ dp, value });
+  }
+  await api(`/api/device/${id}/multi_payload`, 'POST', { commands });
+}
+
 async function groupScenePayload(name) {
   const dp = prompt('Scene DP/channel to send? Use 6, 7, 8, 9, 10 or any numeric DP', '6');
   if (!dp) return;
@@ -991,6 +1025,42 @@ def api_scene_payload(device_id: str):
         scene_payload = str(payload.get("payload", "")).strip()
         result = set_scene_payload(device_id, dp, scene_payload)
         return jsonify({"ok": True, "device": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/device/<device_id>/multi_payload", methods=["POST"])
+def api_multi_payload(device_id: str):
+    try:
+        payload = request.get_json(force=True)
+        commands = payload.get("commands", [])
+        if not isinstance(commands, list) or not commands:
+            return jsonify({"error": "commands must be a non-empty list"}), 400
+        client = get_client(device_id)
+        states = {}
+        for cmd in commands:
+            dp = str(cmd.get("dp", "")).strip()
+            value = cmd.get("value", "")
+            if not dp.isdigit():
+                return jsonify({"error": f"Invalid dp: {dp}"}), 400
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered == "true":
+                    parsed = True
+                elif lowered == "false":
+                    parsed = False
+                else:
+                    try:
+                        parsed = int(value)
+                    except Exception:
+                        parsed = value
+            else:
+                parsed = value
+            states[dp] = parsed
+        client.set_multiple_values(states)
+        time.sleep(0.2)
+        refresh_device_status(find_device(device_id))
+        return jsonify({"ok": True, "device": last_status.get(device_id, {})})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
