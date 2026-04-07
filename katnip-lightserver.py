@@ -133,7 +133,6 @@ def init_clients() -> None:
         clients = {d["id"]: make_client(d) for d in devices if d.get("ip")}
 
 
-
 def find_device(device_id: str) -> Optional[Dict[str, Any]]:
     for d in devices:
         if d["id"] == device_id:
@@ -164,7 +163,6 @@ def parse_hsv_string(hsv_hex: str) -> Dict[str, int]:
     except Exception:
         pass
     return {"h": 0, "s": 0, "v": 0}
-
 
 
 def normalize_status(device: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -202,7 +200,6 @@ def normalize_status(device: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, A
     }
 
 
-
 def refresh_device_status(device: Dict[str, Any]) -> None:
     device_id = device["id"]
     try:
@@ -217,11 +214,9 @@ def refresh_device_status(device: Dict[str, Any]) -> None:
             last_error[device_id] = str(e)
 
 
-
 def refresh_all_status() -> None:
     for device in devices:
         refresh_device_status(device)
-
 
 
 def poller() -> None:
@@ -233,7 +228,6 @@ def poller() -> None:
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-
 def set_white(device_id: str, brightness: int) -> Dict[str, Any]:
     brightness = max(25, min(255, int(brightness)))
     client = get_client(device_id)
@@ -242,7 +236,6 @@ def set_white(device_id: str, brightness: int) -> Dict[str, Any]:
     time.sleep(0.15)
     refresh_device_status(find_device(device_id))
     return last_status.get(device_id, {})
-
 
 
 def set_temp(device_id: str, temp: int) -> Dict[str, Any]:
@@ -266,7 +259,6 @@ def set_temp(device_id: str, temp: int) -> Dict[str, Any]:
     return last_status.get(device_id, {})
 
 
-
 def set_colour(device_id: str, h: int, s: int, v: int) -> Dict[str, Any]:
     h = max(1, min(360, int(h)))
     s = max(1, min(255, int(s)))
@@ -279,10 +271,8 @@ def set_colour(device_id: str, h: int, s: int, v: int) -> Dict[str, Any]:
     return last_status.get(device_id, {})
 
 
-
 def devices_for_group(group_name: str) -> List[Dict[str, Any]]:
     return [d for d in devices if d.get("group") == group_name]
-
 
 
 def set_scene_payload(device_id: str, dp: str, payload: str) -> Dict[str, Any]:
@@ -519,16 +509,29 @@ const editorState = {};
 function hsvToHex(h, s, v) {
   s /= 255;
   v /= 255;
-  let c = v * s;
-  let x = c * (1 - Math.abs((h / 60) % 2 - 1));
-  let m = v - c;
-  let r = 0, g = 0, b = 0;
-  if (h < 60) [r, g, b] = [c, x, 0];
-  else if (h < 120) [r, g, b] = [x, c, 0];
-  else if (h < 180) [r, g, b] = [0, c, x];
-  else if (h < 240) [r, g, b] = [0, x, c];
-  else if (h < 300) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
+
+  const c = v * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = v - c;
+
+  let r = 0;
+  let g = 0;
+  let b = 0;
+
+  if (h < 60) {
+    r = c; g = x; b = 0;
+  } else if (h < 120) {
+    r = x; g = c; b = 0;
+  } else if (h < 180) {
+    r = 0; g = c; b = x;
+  } else if (h < 240) {
+    r = 0; g = x; b = c;
+  } else if (h < 300) {
+    r = x; g = 0; b = c;
+  } else {
+    r = c; g = 0; b = x;
+  }
+
   const toHex = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
@@ -853,7 +856,7 @@ async function sendScenePayload(id) {
 
 async function sendBatchPayload(id) {
   const raw = document.getElementById(`batch-payload-${id}`).value;
-  const lines = raw.split('\n').map((x) => x.replace(/\r/g, '').trim()).filter((x) => x.length > 0);
+  const lines = raw.split('\\n').map((x) => x.replace(/\\r/g, '').trim()).filter((x) => x.length > 0);
   if (!lines.length) {
     alert('Enter one or more commands like dp=value');
     return;
