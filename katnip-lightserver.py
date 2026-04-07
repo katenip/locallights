@@ -286,9 +286,9 @@ def devices_for_group(group_name: str) -> List[Dict[str, Any]]:
 
 
 def set_scene_payload(device_id: str, dp: str, payload: str) -> Dict[str, Any]:
-    dp = str(dp)
-    if dp not in SCENE_DP_OPTIONS:
-        raise ValueError(f"Unsupported scene dp: {dp}")
+    dp = str(dp).strip()
+    if not dp.isdigit():
+        raise ValueError(f"DP must be numeric, got: {dp}")
     payload = str(payload).strip()
     if not payload:
         raise ValueError("Scene payload cannot be empty")
@@ -317,7 +317,7 @@ def run_group_action(group_name: str, action: str, payload: Optional[Dict[str, A
         elif action == "color":
             set_colour(d["id"], int(payload.get("h", 1)), int(payload.get("s", 255)), int(payload.get("v", 255)))
         elif action == "scene_payload":
-            set_scene_payload(d["id"], str(payload.get("dp", "6")), str(payload.get("payload", "")))
+            set_scene_payload(d["id"], str(payload.get("dp", "6")).strip(), str(payload.get("payload", "")))
     refresh_all_status()
 
 
@@ -598,6 +598,9 @@ function buildDeviceCard(d) {
     ? 'Real warm/cool white channel'
     : 'Approximate warmth using RGB colour mode';
 
+  const scenePayloads = d.scene_payloads || {};
+  const currentPayload = scenePayloads['6'] || scenePayloads['7'] || scenePayloads['8'] || scenePayloads['9'] || scenePayloads['10'] || '';
+
   card.innerHTML = `
     <div class="card-top">
       <div>
@@ -631,7 +634,7 @@ function buildDeviceCard(d) {
       <button class="action" onclick="setCool('${d.id}')">Cool</button>
     </div>
 
-    <div class="control-label">Raw scene payload</div>
+    <div class="control-label">Loaded current payload</div>
     <div class="row">
       <select id="scenedp-${d.id}" style="flex:0 0 140px;">
         <option value="6">DP 6</option>
@@ -641,9 +644,16 @@ function buildDeviceCard(d) {
         <option value="10">DP 10</option>
       </select>
       <button class="action" onclick="loadScenePayload('${d.id}')">Load current</button>
+      <button class="action" onclick="copyLoadedPayload('${d.id}')">Copy → send</button>
+    </div>
+    <textarea id="loaded-scenepayload-${d.id}" readonly style="width:100%; min-height:72px; border:1px solid var(--border); background:var(--panel-3); color:var(--text); border-radius:16px; padding:12px; resize:vertical;">${currentPayload}</textarea>
+
+    <div class="control-label">Send raw payload</div>
+    <div class="row">
+      <input id="send-dp-${d.id}" type="text" value="6" placeholder="DP" style="flex:0 0 100px;" />
       <button class="action primary" onclick="sendScenePayload('${d.id}')">Send raw</button>
     </div>
-    <textarea id="scenepayload-${d.id}" style="width:100%; min-height:90px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;">${(d.scene_payloads && (d.scene_payloads['6'] || d.scene_payloads['7'] || d.scene_payloads['8'] || d.scene_payloads['9'] || d.scene_payloads['10'])) || ''}</textarea>
+    <textarea id="send-scenepayload-${d.id}" style="width:100%; min-height:90px; border:1px solid var(--border); background:var(--panel-2); color:var(--text); border-radius:16px; padding:12px; resize:vertical;"></textarea>
 
     <div class="tiny" style="margin-top:10px;">Mode: ${d.mode || 'unknown'}</div>
   `;
@@ -748,9 +758,9 @@ async function groupColor(name, value) {
   await loadDevices();
 }
 
-async function loadScenePayload(id) {
+async async function loadScenePayload(id) {
   const select = document.getElementById(`scenedp-${id}`);
-  const area = document.getElementById(`scenepayload-${id}`);
+  const area = document.getElementById(`loaded-scenepayload-${id}`);
   const dp = select.value;
   area.value = 'Loading...';
   try {
@@ -773,9 +783,21 @@ async function loadScenePayload(id) {
   }
 }
 
+function copyLoadedPayload(id) {
+  const loaded = document.getElementById(`loaded-scenepayload-${id}`).value;
+  const sendArea = document.getElementById(`send-scenepayload-${id}`);
+  const selectedDp = document.getElementById(`scenedp-${id}`).value;
+  document.getElementById(`send-dp-${id}`).value = selectedDp;
+  sendArea.value = loaded;
+}
+
 async function sendScenePayload(id) {
-  const dp = document.getElementById(`scenedp-${id}`).value;
-  const payload = document.getElementById(`scenepayload-${id}`).value.trim();
+  const dp = document.getElementById(`send-dp-${id}`).value.trim();
+  const payload = document.getElementById(`send-scenepayload-${id}`).value.trim();
+  if (!dp) {
+    alert('Enter a DP/channel to send to.');
+    return;
+  }
   if (!payload) {
     alert('Paste a raw scene payload first.');
     return;
@@ -785,7 +807,7 @@ async function sendScenePayload(id) {
 }
 
 async function groupScenePayload(name) {
-  const dp = prompt('Scene DP to send? Use 6, 7, 8, 9, or 10', '6');
+  const dp = prompt('Scene DP/channel to send? Use 6, 7, 8, 9, 10 or any numeric DP', '6');
   if (!dp) return;
   const payload = prompt('Paste raw scene payload');
   if (!payload) return;
@@ -933,7 +955,7 @@ def api_color(device_id: str):
 def api_scene_payload(device_id: str):
     try:
         payload = request.get_json(force=True)
-        dp = str(payload.get("dp", "6"))
+        dp = str(payload.get("dp", "6")).strip()
         scene_payload = str(payload.get("payload", "")).strip()
         result = set_scene_payload(device_id, dp, scene_payload)
         return jsonify({"ok": True, "device": result})
